@@ -1,0 +1,312 @@
+
+```{r}
+rm(list=ls())
+```
+
+#Install the rentrez package to query the downloaded sequences
+```{r}
+# install.packages("rentrez")
+# install.packages("tidyverse")
+# install.packages("cli")
+install.packages("svglite")
+# library(rentrez)
+library(tidyverse)
+library(dplyr)
+library(svglite)
+```
+
+#Create heatmap.
+First gather all the relevant files together
+
+```{r}
+library(readr)
+
+folder_append <- function(pattern_match, starting_directory){
+
+  # List all .tsv files in the subdirectory
+  files <- list.files(path = starting_directory, pattern = pattern_match, full.names = TRUE, recursive = TRUE)
+
+  # Load and combine all .tsv files into one dataframe
+  df <- do.call("rbind", lapply(files, function(x) {
+    data <- read_tsv(x, show_col_types = FALSE)
+    data$file_name <- basename(x)  # Add the file name as a new column
+    return(data)
+  }))
+  
+  return(df)
+}
+
+#Also get the GDBTK File
+# gtdb_data <- read_tsv("C:\\Users\\Justin\\Desktop\\Bioinf_PBI\\gtdbtk_summary.tsv")
+
+#Add the list of controls
+control_list <- read.csv("control_list.csv")
+
+```
+
+
+```{r}
+#Test on one folder
+#test_1 <- folder_append("product_.*\\.tsv","C:\\Users\\Justin\\Desktop\\Bioinf_PBI\\DRAM_controls\\gather_dram_product_tsv\\")
+
+#Function to import folder
+dram_append <- folder_append("product_.*\\.tsv",
+                        "C:\\Users\\Justin\\Desktop\\Bioinf_PBI\\DRAM gathered - 23 July")
+
+
+```
+
+
+```{r}
+#Tidy the dram file
+dram_clean <- dram_append %>%
+  #Add a column to extract between the first two underscores
+  mutate(sample = sub("product_","",file_name)) %>%
+  #If the file sample starts with GCA
+  mutate(sample = ifelse(substr(sample,1,3)=="GCA",
+                            #Then extract the GCA bit to the next underscore
+                            gsub(".*(GCA_[^_]*).*", "\\1", sample),
+                            #Otherwise just extract to the first underscore
+                            gsub("_.*$", "\\1", sample))) %>%
+  #Exract the Binner from this
+  rowwise()%>%
+  mutate(Binner=gsub(paste0("product_",sample,"_"),"",file_name),
+         Binner=gsub(paste0("_",genome,".tsv"),"",Binner))%>%
+  ungroup() %>%
+  #Then just clear anything which was downloaded from NCBI, rather than binned
+  mutate(Binner= ifelse(substr(sample,1,3)=="GCA","",Binner))%>%
+  select(sample,genome,Binner,everything())
+
+#Exclude columns in gtdb merge
+gtdb_merge <- gtdb_data %>%
+  select(user_genome,classification,Sample,Binner)
+
+#Merge with GTDB
+dram_gtdb <- dram_clean %>%
+  left_join(gtdb_merge,by=c("sample"="Sample","Binner"="Binner","genome"="user_genome")) %>%
+  select(classification,everything()) %>%
+  left_join(control_list, by=c("sample"="sample")) %>%
+  mutate(classification=ifelse(is.na(classification),Organism,classification))
+
+write.csv(dram_gtdb,"dram_controls_csp1-3.csv", row.names = FALSE,na="")
+```
+
+#Clean so that can create heatmap
+#Careful if there's two specimens with metabat sspec and ssens as these will be grouped in so might need to use alternate code below:
+(Maybe make that dynamic if going to be re-running)
+```{r}
+#
+heatmap_tidy <- dram_gtdb %>%
+  #Get rid of the DSM bits after the controls
+  mutate(Organism = gsub("7 = DSM 20455|DSM \\d*$","",classification)) %>%
+  #Replace all SRA GTDB identified specimens with CSP1-3 then the sample and binner
+  rowwise() %>%
+  mutate(Organism = gsub("^d__.*CSP.*",paste0("CSP1-3 ",sample," ",Binner," ",genome),Organism)) %>%
+  ungroup()%>%
+  mutate(Organism = gsub("_bins","",Organism))%>% 
+  #Have CSP1-3 starting with the GCA data so it arranges with the SRA CSP1-3
+  mutate(Organism = gsub("Armatimonadetes bacterium CSP1-3","CSP1-3 Armatimonadetes bacterium",Organism))%>% 
+  mutate(Organism = gsub("Bacterium HR32","CSP1-3 Bacterium HR32",Organism)) %>%
+  #If it's a control then add that to the organism name
+  rowwise()%>%
+  mutate(Organism = ifelse(substr(sample,1,3)=="GCA",paste(Organism,sample),Organism))%>%
+  ungroup() %>%
+  #Select the organism and relevent columns
+  select(Organism,5:17)
+
+```
+
+#just try from here...
+```{r}
+merge_data <- read.csv("C:\\Users\\judavis\\Desktop\\Bioinf\\merged_data_1448_07_10_2023_with_drep_org.csv", check.names = FALSE, stringsAsFactors = FALSE)
+
+```
+
+
+```{r}
+
+# Extract the new column names from the first row
+new_col_names <- as.character(unlist(merge_data[1, ]))
+
+# Remove the first row from the original data frame
+heatmap_data <- merge_data[-1, ]
+
+# Assign the new column names
+colnames(heatmap_data) <- new_col_names
+
+# Convert all columns to characters for consistency
+heatmap_data[] <- lapply(heatmap_data, as.character)
+
+# Now, since you have exact column names, use backticks for non-standard names in dplyr operations
+library(dplyr)
+
+heatmap_tidy <- heatmap_data %>%
+  filter(Drep == "Yes") %>%
+  select(Organism, 215: 226) %>%
+  mutate(across(-Organism, as.numeric, .names = "{.col}"))
+
+```
+
+
+
+
+```{r}
+# Load the required libraries
+library(tidyverse)
+library(reshape2) # for melt function
+library(viridis) # for viridis color palette
+library(forcats) #To fix the stupid catagorical variables not getting alphabetised on the heatmap
+
+# Transform it into long format
+heatmap_long <- melt(heatmap_tidy, id.vars = "Organism") %>%
+  arrange %>%
+  mutate(value = as.numeric(value))
+
+# Convert value to percentage and round
+heatmap_long$value <- round(heatmap_long$value * 100) 
+
+#Arrange it
+heatmap_long <- heatmap_long %>% 
+  #Hydroxypropionate is messing up the formatting of the chart
+  mutate(variable=gsub("Hydroxypropionate","Hydroxy-propionate",variable))%>%
+  #Put a space so hopefully the wordwrap works beter
+  mutate(variable=gsub("-","- ",variable))%>%
+  arrange(Organism)
+
+#Need to have labels as factors or it won't order alphabetically...
+# Convert 'Organism' to a factor and order its levels alphabetically
+heatmap_long$Organism <- factor(heatmap_long$Organism, levels = sort(unique(heatmap_long$Organism)))
+```
+
+
+Heatmap #1 labels at the bottom
+```{r}
+# Create the color palette
+color_palette <- colorRampPalette(c("white", "purple"))(100)
+
+# Create the heatmap
+heatmap_image <- ggplot(heatmap_long, aes(x = variable, y = Organism, fill = value)) +
+  geom_tile() +
+  scale_fill_gradientn(colours = color_palette) +
+  theme_minimal() +
+  labs(x = "Percentage of Modules identified by DRAM for each Pathway", y = "Organism") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  geom_text(aes(label = paste0(value, "%")), color = "black", size = 4)
+
+# Save the heatmap to a image files
+ggsave(filename = "heatmap.png", plot = heatmap_image, width = 15, height = 15, dpi = 300)
+ggsave(filename = "heatmap.svg", plot = heatmap_image, width = 15, height = 15)
+```
+
+```{r}
+heatmap_image <- ggplot(heatmap_long, aes(x = variable, y = Organism, fill = value))
+print(heatmap_image)
+```
+
+
+Heatmap #1 labels at the bottom
+```{r}
+# Load the required library
+library(stringr)
+
+# Create the heatmap
+heatmap_image <- ggplot(heatmap_long, aes(x = variable, y = Organism, fill = value)) +
+  geom_tile() +
+  scale_fill_gradientn(colours = color_palette) +
+  scale_x_discrete(position = "top") +
+  theme_minimal() +
+  labs(x = "Percentage of Modules identified by DRAM for each Pathway", y = "Organism") +
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5, vjust = 0.5)) +
+  geom_text(aes(label = paste0(value, "%")), color = "black", size = 4)
+
+# Modify x-axis labels to be wrapped
+heatmap_image <- heatmap_image + 
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5)) +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 10))
+
+ggsave(filename = "heatmap_2.png", plot = heatmap_image, width = 15, height = 15, dpi = 300)
+ggsave(filename = "heatmap_2.svg", plot = heatmap_image, width = 15, height = 15)
+
+```
+#Third time's a charm
+```{r}
+# Load the required library
+
+
+# Create the heatmap
+heatmap_image <- ggplot(heatmap_long, aes(x = variable, y = Organism, fill = value)) +
+  geom_tile() +
+  scale_fill_gradientn(colours = color_palette) +
+  scale_x_discrete(position = "top") +
+  theme_minimal() +
+  theme(axis.title.x = element_text(vjust = 1),  # move x-axis title to the top
+        axis.text.x = element_text(angle = 0, hjust = 0.5, vjust = 0.5)) +
+  labs(x = "Percentage of Modules identified by DRAM for each Pathway", y = "Genome") +
+  geom_text(aes(label = paste0(value, "%")), color = "black", size = 4)
+
+# Modify x-axis labels to be wrapped
+heatmap_image <- heatmap_image + 
+  theme(axis.text.x = element_text(angle = 0, hjust = 0.5)) +
+  scale_x_discrete(labels = function(x) str_wrap(x, width = 10))
+
+# Print the heatmap
+print(heatmap_image)
+
+ggsave(filename = "heatmap_3.png", plot = heatmap_image, width = 15, height = 15, dpi = 300)
+ggsave(filename = "heatmap_3.svg", plot = heatmap_image, width = 15, height = 15)
+```
+
+
+```{r}
+library(ggplot2)
+library(reshape2)
+library(data.table)
+
+dt <- read.table("http://archive.ics.uci.edu/ml/machine-learning-databases/wine/wine.data", sep = ",")
+cor.mat <- cor(dt[1:10], method = "spearman")
+cor.mat.melt <- melt(cor.mat)
+colnames(cor.mat.melt) <- c("x1","x2","Corelation")
+cor.mat.melt$x1 <- factor(cor.mat.melt$x1, levels = c("V10", "V9", "V8", "V7", "V6", 
+                                                      "V1", "V2", "V3", "V4", "V5"))
+cor.mat.melt$x2 <- factor(cor.mat.melt$x2, levels = c("V10", "V9", "V8", "V7", "V6", 
+                                                      "V1", "V2", "V3", "V4", "V5"))
+
+
+
+ggplot(data = cor.mat.melt,
+       aes(x = x1, y = x2)) +
+geom_tile(aes(fill = Corelation)) +
+scale_fill_gradientn(colours = rainbow(3)) +
+geom_text(aes(x = x1, y = x2, label = round(Corelation, 2))) +
+labs(x = "", y = "")
+```
+
+
+```{r}
+print(heatmap_image)
+```
+
+
+
+```{r}
+names(dram_gtdb)
+```
+
+
+#Ye Olde Code
+Might need to use this later so don't delete....
+```{r}
+# library(readr)
+# 
+# folder_append <- function(pattern_match, starting_directory){
+# 
+# # List all .tsv files in the subdirectory
+# files <- list.files(path = starting_directory, pattern = pattern_match, full.names = TRUE,recursive = TRUE)
+# 
+# # Load and combine all .tsv files into one dataframe
+# df <- do.call("rbind", lapply(files, function(x) read_tsv(x,show_col_types=FALSE)))
+#   
+# }
+```
+
+
